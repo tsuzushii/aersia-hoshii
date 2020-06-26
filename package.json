@@ -1,0 +1,36 @@
+{
+  "name": "aersia-hoshii",
+  "version": "1.0.0",
+  "description": " Simple utility script that downloads all the songs from the Aersia playlists (VIP, Source, Mellow & Exiled)",
+  "main": "script.ts",
+  "scripts": {
+    "start": "tsc script.ts && node script.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/soichirou/aersia-hoshii.git"
+  },
+  "keywords": [
+    "aersia",
+    "script",
+    "downloader"
+  ],
+  "author": "tsuzushii",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/soichirou/aersia-hoshii/issues"
+  },
+  "homepage": "https://github.com/soichirou/aersia-hoshii#readme",
+  "dependencies": {
+    "@types/axios": "^0.14.0",
+    "@types/xml2js": "^0.4.5",
+    "axios": "^0.19.2",
+    "sanitize-filename-ts": "^1.0.2",
+    "taglib3": "^3.0.11",
+    "xml2js": "^0.4.23"
+  },
+  "devDependencies": {
+    "@types/node": "^14.0.13",
+    "typescript": "^3.9.5"
+  }
+}
