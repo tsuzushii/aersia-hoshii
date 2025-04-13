@@ -2,17 +2,6 @@
 
 An advanced downloader for [Aersia VGM](https://www.vipvgm.net) playlists.
 
-## Features
-
-- **Download all songs** from Aersia playlists (VIP, Source, Mellow, Exiled, WAP, CPP)
-- **Parallel downloads** with rate limiting to avoid throttling
-- **Resume capability** - continue downloads after interruptions
-- **Progress tracking** with visual progress bars
-- **Intelligent retry mechanism** with exponential backoff
-- **Automatic metadata tagging** of downloaded files
-- **Detailed logging** for troubleshooting
-- **Command-line interface** with extensive options
-
 ## Installation
 
 ### Prerequisites
