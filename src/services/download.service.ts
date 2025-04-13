@@ -3,10 +3,10 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Track, TrackStatus } from '../models/track.model';
+import { RateLimiter } from '../utils/rate-limiter';
 import { FileService } from './file.service';
 import { Logger } from './logger.service';
 import { StateManager } from './state.service';
-import { RateLimiter } from '../utils/rate-limiter';
 
 export interface DownloadProgress {
   track: Track;
@@ -25,7 +25,15 @@ export interface DownloadManagerOptions {
 
 export class DownloadManager extends EventEmitter {
   private queue: Track[] = [];
-  private inProgress: Map<string, { track: Track, abortController: AbortController }> = new Map();
+  private inProgress: Map<string, { 
+    track: Track, 
+    abortController: AbortController,
+    progress: { 
+      bytesDownloaded: number, 
+      totalBytes: number, 
+      percentage: number 
+    } 
+  }> = new Map();
   private rateLimiter: RateLimiter;
   private isProcessing: boolean = false;
   private paused: boolean = false;
@@ -136,7 +144,15 @@ export class DownloadManager extends EventEmitter {
     const abortController = new AbortController();
     
     // Mark track as in progress
-    this.inProgress.set(track.id, { track, abortController });
+    this.inProgress.set(track.id, { 
+      track, 
+      abortController,
+      progress: {
+        bytesDownloaded: track.bytesDownloaded || 0,
+        totalBytes: track.totalBytes || 0,
+        percentage: 0
+      }
+    });
     
     // Update track status
     this.stateManager.updateTrackStatus(
@@ -146,7 +162,26 @@ export class DownloadManager extends EventEmitter {
       track.bytesDownloaded || 0
     );
     
+    // Emit start event
+    this.emit('start', track);
+    
     try {
+      // Check if file already exists and is complete
+      const fileInfo = await this.fileService.getFileInfo(track.filePath);
+      if (fileInfo.exists && track.totalBytes && fileInfo.size === track.totalBytes) {
+        this.logger.info(`File ${track.fileName} already exists and is complete, skipping`);
+        
+        this.stateManager.updateTrackStatus(
+          track.playlistName,
+          track.id,
+          TrackStatus.COMPLETED,
+          track.totalBytes
+        );
+        
+        this.emit('skip', track, 'already exists and is complete');
+        return;
+      }
+      
       // Create directory if it doesn't exist
       const dir = path.dirname(track.filePath);
       await fs.promises.mkdir(dir, { recursive: true });
@@ -161,9 +196,14 @@ export class DownloadManager extends EventEmitter {
           const stats = await fs.promises.stat(tempFilePath);
           if (stats.size === track.bytesDownloaded) {
             startByte = stats.size;
+            this.logger.debug(`Resuming download for ${track.fileName} from byte ${startByte}`);
+          } else {
+            this.logger.debug(`Temp file size (${stats.size}) doesn't match recorded bytes downloaded (${track.bytesDownloaded}), starting from 0`);
+            track.bytesDownloaded = 0;
           }
         } catch (err) {
           // File doesn't exist or can't be accessed, start from beginning
+          this.logger.debug(`No temp file found for ${track.fileName}, starting from beginning`);
           track.bytesDownloaded = 0;
         }
       }
@@ -171,7 +211,7 @@ export class DownloadManager extends EventEmitter {
       // Set up request with resume headers if needed
       const config: AxiosRequestConfig = {
         responseType: 'stream',
-        signal: abortController.signal,
+        signal: abortController.signal, // Use AbortSignal
         headers: {}
       };
       
@@ -196,8 +236,9 @@ export class DownloadManager extends EventEmitter {
       response.data.on('data', (chunk: Buffer) => {
         downloadedBytes += chunk.length;
         
-        // Update progress every 100KB to avoid too many updates
-        if (downloadedBytes % 102400 === 0 || downloadedBytes === totalBytes) {
+        // Update progress more frequently
+        if (downloadedBytes % 51200 === 0 || downloadedBytes === totalBytes) { // Every 50KB
+          // Update track state
           this.stateManager.updateTrackStatus(
             track.playlistName,
             track.id,
@@ -205,12 +246,32 @@ export class DownloadManager extends EventEmitter {
             downloadedBytes
           );
           
-          this.emit('progress', {
+          // Calculate percentage properly
+          const percentage = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+          
+          // Update progress in memory
+          const progress = {
             track,
             bytesDownloaded: downloadedBytes,
             totalBytes,
-            percentage: totalBytes ? Math.round((downloadedBytes / totalBytes) * 100) : 0
-          });
+            percentage
+          };
+          
+          // Update in-progress map
+          const inProgressEntry = this.inProgress.get(track.id);
+          if (inProgressEntry) {
+            inProgressEntry.progress = {
+              bytesDownloaded: downloadedBytes,
+              totalBytes,
+              percentage
+            };
+          }
+          
+          // Emit progress event
+          this.emit('progress', progress);
+          
+          // Log progress for debugging
+          this.logger.debug(`Download progress: ${track.fileName} - ${percentage}% (${downloadedBytes}/${totalBytes} bytes)`);
         }
       });
       
@@ -239,6 +300,12 @@ export class DownloadManager extends EventEmitter {
       this.emit('complete', track);
       
     } catch (error: any) {
+      // Check if the error is due to cancellation
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        this.logger.info(`Download cancelled for ${track.fileName}`);
+        return;
+      }
+      
       const errorMessage = error.message || 'Unknown error';
       
       // Determine whether to retry based on error type
@@ -266,7 +333,7 @@ export class DownloadManager extends EventEmitter {
         
         setTimeout(() => {
           this.queue.push(track);
-          this.emit('retry', track);
+          this.emit('retry', track, errorMessage);
         }, retryDelay);
       } else {
         this.emit('fail', track, errorMessage);
@@ -300,7 +367,7 @@ export class DownloadManager extends EventEmitter {
     }
     
     // Abort errors are not retryable
-    if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
+    if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
       return false;
     }
     
@@ -345,7 +412,7 @@ export class DownloadManager extends EventEmitter {
   public cancel(trackId: string): boolean {
     const download = this.inProgress.get(trackId);
     if (download) {
-      download.abortController.abort();
+      download.abortController.abort(); // Use abort() instead of cancel()
       this.inProgress.delete(trackId);
       return true;
     }
@@ -366,7 +433,7 @@ export class DownloadManager extends EventEmitter {
   public cancelAll(): void {
     // Cancel all in-progress downloads
     for (const [, download] of this.inProgress) {
-      download.abortController.abort();
+      download.abortController.abort(); // Use abort() instead of cancel()
     }
     
     this.inProgress.clear();
@@ -374,6 +441,15 @@ export class DownloadManager extends EventEmitter {
     
     this.logger.info('All downloads canceled');
     this.emit('cancel-all');
+  }
+
+  /**
+   * Clear the download queue without canceling in-progress downloads
+   */
+  public clearQueue(): void {
+    const queueSize = this.queue.length;
+    this.queue = [];
+    this.logger.info(`Cleared download queue (${queueSize} tracks removed)`);
   }
 
   /**
@@ -385,5 +461,23 @@ export class DownloadManager extends EventEmitter {
       active: this.inProgress.size,
       paused: this.paused
     };
+  }
+
+  /**
+   * Get active downloads with progress information
+   */
+  public getActiveDownloadsForPlaylist(playlistName: string): Array<{track: Track, progress: any}> {
+    const result = [];
+    
+    for (const [, data] of this.inProgress) {
+      if (data.track.playlistName === playlistName) {
+        result.push({
+          track: data.track,
+          progress: data.progress
+        });
+      }
+    }
+    
+    return result;
   }
 }

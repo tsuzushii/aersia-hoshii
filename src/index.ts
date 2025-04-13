@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getPlaylistInfo, loadConfig } from './config/config';
+import { loadConfig } from './config/config';
 import { Track } from './models/track.model';
 import { DownloadManager } from './services/download.service';
 import { FileService } from './services/file.service';
@@ -22,7 +22,7 @@ program
   .option('-r, --rate <number>', 'Requests per minute', '30')
   .option('-o, --output <path>', 'Output directory')
   .option('-l, --log-level <level>', 'Log level (debug, info, warn, error)', 'info')
-  .option('--resume', 'Resume previous download session')
+  .option('--no-resume', 'Disable auto-resume (not recommended)')
   .option('--log-file <path>', 'Log to file')
   .option('--no-progress', 'Disable progress bar')
   .option('--config <path>', 'Path to config file');
@@ -46,14 +46,23 @@ async function main() {
     config.requestsPerMinute = parseInt(options.rate, 10);
   }
   
+  // Check if state file exists to determine if we're resuming
+  const stateFilePath = path.join(config.baseDir || './', '.aersia-state.json');
+  const isResuming = fs.existsSync(stateFilePath) && options.resume !== false;
+  
   // Setup logger
   const logLevel = getLogLevel(options.logLevel);
   const logger = new Logger({
     level: logLevel,
     logToConsole: true,
     logToFile: !!options.logFile,
-    logFilePath: options.logFile
+    logFilePath: options.logFile || path.join(config.outputDir, 'aersia-downloader.log')
   });
+  
+  logger.info(`Aersia Downloader v2.0.0 starting`);
+  logger.info(`Output directory: ${config.outputDir}`);
+  logger.info(`Max concurrent downloads: ${config.maxConcurrentDownloads}`);
+  logger.info(`Rate limit: ${config.requestsPerMinute} requests/minute`);
   
   // Ensure output directory exists
   if (!fs.existsSync(config.outputDir)) {
@@ -61,7 +70,7 @@ async function main() {
   }
   
   // Initialize services
-  const stateManager = new StateManager(config.baseDir);
+  const stateManager = new StateManager(config.baseDir, logger);
   const fileService = new FileService(logger);
   
   const downloadManager = new DownloadManager(
@@ -76,39 +85,43 @@ async function main() {
     }
   );
   
+  // Start periodic state logging
+  stateManager.startPeriodicStateLogging(60000); // Log every minute
+  
   // Setup progress tracker
   let progressTracker: ProgressTracker | null = null;
   if (options.progress !== false) {
     progressTracker = new ProgressTracker(
       downloadManager,
       stateManager,
+      logger,
       config.progressUpdateIntervalMs
     );
     progressTracker.start();
   }
   
   // Handle termination signals
-  setupSignalHandlers(logger, downloadManager, progressTracker);
+  setupSignalHandlers(logger, downloadManager, progressTracker, stateManager);
   
   // Initialize playlist service
-  const playlistService = new PlaylistService(logger, config);
+  const playlistService = new PlaylistService(logger, config, fileService);
   
   try {
-    // Show resume information if available
-    if (options.resume) {
+    // Show resume information if resuming
+    if (isResuming) {
+      logger.info('Resuming previous download session');
       logger.info(stateManager.getResumeInfo());
+    } else {
+      logger.info('Starting new download session');
     }
     
     // Determine which playlists to download
-    const { newPlaylists, oldPlaylists } = getPlaylistInfo(config);
-    let playlistsToDownload = [...newPlaylists, ...oldPlaylists];
-    
+    let requestedPlaylists: string[] | undefined;
     if (options.playlists) {
-      const requestedPlaylists = options.playlists.split(',').map((p: string) => p.trim());
-      playlistsToDownload = playlistsToDownload.filter(([name]) => 
-        requestedPlaylists.includes(name)
-      );
+      requestedPlaylists = options.playlists.split(',').map((p: string) => p.trim());
     }
+    
+    const playlistsToDownload = playlistService.getPlaylistsToDownload(requestedPlaylists);
     
     if (playlistsToDownload.length === 0) {
       logger.error('No playlists selected for download');
@@ -117,12 +130,18 @@ async function main() {
     
     logger.info(`Starting download for playlists: ${playlistsToDownload.map(([name]) => name).join(', ')}`);
     
-    // Process each playlist
+    // Process each playlist one by one
     for (const [name, url] of playlistsToDownload) {
       logger.info(`Processing playlist: ${name}`);
       stateManager.setCurrentPlaylist(name);
       
       try {
+        // Create playlist directory
+        await playlistService.createPlaylistDirectory(name);
+        
+        // Clear previous queue - important when processing playlists one by one
+        downloadManager.clearQueue();
+        
         // Fetch and parse playlist
         let tracks: Track[];
         
@@ -137,6 +156,10 @@ async function main() {
         // Update state with new tracks
         stateManager.initPlaylist(name, tracks);
         
+        // Log detailed playlist state
+        const initialState = stateManager.getPlaylistDetailedState(name);
+        logger.debug(`Initial playlist state for ${name}: ${JSON.stringify(initialState.statusCounts)}`);
+        
         // Get pending tracks (not downloaded or failed with retries left)
         const pendingTracks = stateManager.getPendingTracks(name);
         
@@ -150,23 +173,16 @@ async function main() {
         // Add tracks to download queue
         downloadManager.addToQueue(pendingTracks);
         
-        // Wait for all downloads to complete
-        await new Promise<void>((resolve) => {
-          const checkComplete = () => {
-            const pendingCount = stateManager.getPendingTracks(name).length;
-            if (pendingCount === 0) {
-              resolve();
-            } else {
-              setTimeout(checkComplete, 1000);
-            }
-          };
-          
-          checkComplete();
-        });
+        // Wait for all downloads to complete for this playlist
+        await waitForPlaylistCompletion(name, stateManager, logger, 1000, downloadManager);
+        
+        // Log final playlist state
+        const finalState = stateManager.getPlaylistDetailedState(name);
+        logger.debug(`Final playlist state for ${name}: ${JSON.stringify(finalState.statusCounts)}`);
         
         logger.info(`Completed playlist: ${name}`);
-      } catch (error) {
-        logger.error(`Error processing playlist ${name}: ${error}`);
+      } catch (error: any) {
+        logger.error(`Error processing playlist ${name}: ${error.message}`);
       }
     }
     
@@ -181,8 +197,8 @@ async function main() {
     logger.close();
     
     process.exit(0);
-  } catch (error) {
-    logger.error(`Unexpected error: ${error}`);
+  } catch (error: any) {
+    logger.error(`Unexpected error: ${error.message}`);
     
     if (progressTracker) {
       progressTracker.stop();
@@ -193,6 +209,40 @@ async function main() {
     
     process.exit(1);
   }
+}
+
+/**
+ * Wait for all tracks in a playlist to complete downloading
+ */
+async function waitForPlaylistCompletion(
+  playlistName: string, 
+  stateManager: StateManager,
+  logger: Logger,
+  checkIntervalMs: number = 1000,
+  downloadManager: DownloadManager
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const checkComplete = () => {
+      const playlistStats = stateManager.getPlaylistStats(playlistName);
+      
+      // Check if there are no more pending tracks or active downloads
+      const pendingTracks = stateManager.getPendingTracks(playlistName);
+      const activeDownloads = downloadManager.getActiveDownloadsForPlaylist(playlistName);
+      
+      if (pendingTracks.length === 0 && activeDownloads.length === 0) {
+        logger.info(`All tracks in playlist ${playlistName} are processed (${playlistStats.completed}/${playlistStats.total} completed, ${playlistStats.failed} failed)`);
+        resolve();
+        return;
+      }
+      
+      logger.debug(`Waiting for playlist ${playlistName} completion: ${pendingTracks.length} pending, ${activeDownloads.length} active`);
+      
+      // Continue checking
+      setTimeout(checkComplete, checkIntervalMs);
+    };
+    
+    checkComplete();
+  });
 }
 
 function getLogLevel(level: string): LogLevel {
@@ -208,7 +258,8 @@ function getLogLevel(level: string): LogLevel {
 function setupSignalHandlers(
   logger: Logger,
   downloadManager: DownloadManager,
-  progressTracker: ProgressTracker | null
+  progressTracker: ProgressTracker | null,
+  stateManager: StateManager
 ) {
   const cleanup = () => {
     logger.info('Gracefully shutting down...');
@@ -218,7 +269,9 @@ function setupSignalHandlers(
       progressTracker.stop();
     }
     
+    stateManager.cleanup();
     logger.close();
+    
     process.exit(0);
   };
   

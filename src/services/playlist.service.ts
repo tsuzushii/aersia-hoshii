@@ -1,19 +1,19 @@
 import axios from 'axios';
-import * as parser from 'xml2js';
-import * as path from 'path';
 import * as fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
+import * as path from 'path';
 import { sanitize } from 'sanitize-filename-ts';
-import { Logger } from './logger.service';
+import { v4 as uuidv4 } from 'uuid';
+import * as parser from 'xml2js';
 import { AppConfig } from '../config/config';
-import { 
-  Track, 
-  TrackStatus, 
-  NewPlaylistTrack, 
+import {
+  NewPlaylistTrack,
   OldPlaylistTrack,
-  PlaylistMetadata 
+  PlaylistMetadata,
+  Track,
+  TrackStatus
 } from '../models/track.model';
 import { FileService } from './file.service';
+import { Logger } from './logger.service';
 
 export class PlaylistService {
   constructor(
@@ -110,6 +110,9 @@ export class PlaylistService {
         
         // Check if file already exists
         const trackStatus = this.fileExistsSync(filePath) ? TrackStatus.COMPLETED : TrackStatus.PENDING;
+        if (trackStatus === TrackStatus.COMPLETED) {
+          this.logger.debug(`Found existing file: ${filePath}`);
+        }
         
         result.push({
           id,
@@ -145,6 +148,9 @@ export class PlaylistService {
           
           // Check if source file already exists
           const sourceTrackStatus = this.fileExistsSync(sourceFilePath) ? TrackStatus.COMPLETED : TrackStatus.PENDING;
+          if (sourceTrackStatus === TrackStatus.COMPLETED) {
+            this.logger.debug(`Found existing source file: ${sourceFilePath}`);
+          }
           
           result.push({
             id: sourceId,
@@ -206,6 +212,9 @@ export class PlaylistService {
         
         // Check if file already exists
         const trackStatus = this.fileExistsSync(filePath) ? TrackStatus.COMPLETED : TrackStatus.PENDING;
+        if (trackStatus === TrackStatus.COMPLETED) {
+          this.logger.debug(`Found existing file: ${filePath}`);
+        }
         
         // Parse special format tracks with "Game - Title" format
         const titleParts = track.title.split(' - ');
@@ -254,6 +263,15 @@ export class PlaylistService {
         }
       });
     }
+    
+    this.logger.info(`Converted ${result.length} tracks for playlist ${playlistName}`);
+    
+    // Log how many tracks are already completed vs. pending
+    const completed = result.filter(t => t.status === TrackStatus.COMPLETED).length;
+    const skipped = result.filter(t => t.status === TrackStatus.SKIPPED).length;
+    const pending = result.filter(t => t.status === TrackStatus.PENDING).length;
+    
+    this.logger.info(`Track status: ${completed} completed, ${skipped} skipped, ${pending} pending`);
     
     return result;
   }
@@ -319,6 +337,10 @@ export class PlaylistService {
       // Check if file already exists
       const trackStatus = this.fileExistsSync(filePath) ? TrackStatus.COMPLETED : TrackStatus.PENDING;
       
+      if (trackStatus === TrackStatus.COMPLETED) {
+        this.logger.debug(`Found existing file: ${filePath}`);
+      }
+      
       result.push({
         id,
         playlistName,
@@ -340,6 +362,14 @@ export class PlaylistService {
       });
     });
     
+    this.logger.info(`Converted ${result.length} tracks for playlist ${playlistName}`);
+    
+    // Log how many tracks are already completed vs. pending
+    const completed = result.filter(t => t.status === TrackStatus.COMPLETED).length;
+    const pending = result.filter(t => t.status === TrackStatus.PENDING).length;
+    
+    this.logger.info(`Track status: ${completed} completed, ${pending} pending`);
+    
     return result;
   }
 
@@ -351,6 +381,7 @@ export class PlaylistService {
     try {
       return fs.existsSync(filePath);
     } catch (error) {
+      this.logger.error(`Error checking if file exists: ${filePath} - ${error}`);
       return false;
     }
   }
@@ -377,9 +408,31 @@ export class PlaylistService {
     
     // Filter by requested playlists if provided
     if (requestedPlaylists && requestedPlaylists.length > 0) {
+      this.logger.info(`Filtering playlists to requested: ${requestedPlaylists.join(', ')}`);
       allPlaylists = allPlaylists.filter(([name]) => 
         requestedPlaylists.includes(name)
       );
+    }
+    
+    // If Source is part of the playlists, make sure VIP comes before it
+    const hasVIP = allPlaylists.some(([name]) => name === 'VIP');
+    const hasSource = allPlaylists.some(([name]) => name === 'Source');
+    
+    if (hasVIP && hasSource) {
+      // Remove Source from its current position
+      allPlaylists = allPlaylists.filter(([name]) => name !== 'Source');
+      
+      // Find VIP index
+      const vipIndex = allPlaylists.findIndex(([name]) => name === 'VIP');
+      
+      // Insert Source after VIP
+      const sourcePlaylist = ['Source', this.config.playlists['Source']];
+      
+      allPlaylists = [
+        ...allPlaylists.slice(0, vipIndex + 1),
+        sourcePlaylist as [string, string],
+        ...allPlaylists.slice(vipIndex + 1)
+      ];
     }
     
     return allPlaylists;
