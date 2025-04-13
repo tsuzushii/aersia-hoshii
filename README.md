@@ -1,6 +1,6 @@
 # Aersia-Hoshii 2.0
 
-An advanced downloader for <a href="https://www.vipvgm.net/" target="_blank">Aersia VGM</a> playlists.
+An advanced downloader for [Aersia VGM](https://www.vipvgm.net) playlists.
 
 ## Features
 
