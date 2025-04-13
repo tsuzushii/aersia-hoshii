@@ -212,7 +212,7 @@ async function main() {
 }
 
 /**
- * Wait for all tracks in a playlist to complete downloading
+ * Wait for all tracks in a playlist to complete downloading or timeout
  */
 async function waitForPlaylistCompletion(
   playlistName: string, 
@@ -222,6 +222,10 @@ async function waitForPlaylistCompletion(
   downloadManager: DownloadManager
 ): Promise<void> {
   return new Promise<void>((resolve) => {
+    const startTime = Date.now();
+    let lastProgressTime = Date.now();
+    let lastCompletedCount = 0;
+    
     const checkComplete = () => {
       const playlistStats = stateManager.getPlaylistStats(playlistName);
       
@@ -229,13 +233,43 @@ async function waitForPlaylistCompletion(
       const pendingTracks = stateManager.getPendingTracks(playlistName);
       const activeDownloads = downloadManager.getActiveDownloadsForPlaylist(playlistName);
       
+      // Track progress
+      if (playlistStats.completed > lastCompletedCount) {
+        lastCompletedCount = playlistStats.completed;
+        lastProgressTime = Date.now();
+      }
+      
+      // Case 1: Normal completion - no more pending tracks or active downloads
       if (pendingTracks.length === 0 && activeDownloads.length === 0) {
         logger.info(`All tracks in playlist ${playlistName} are processed (${playlistStats.completed}/${playlistStats.total} completed, ${playlistStats.failed} failed)`);
         resolve();
         return;
       }
       
-      logger.debug(`Waiting for playlist ${playlistName} completion: ${pendingTracks.length} pending, ${activeDownloads.length} active`);
+      // Case 2: No recent progress for 2 minutes - force completion
+      const noProgressTime = Date.now() - lastProgressTime;
+      if (noProgressTime > 2 * 60 * 1000) {
+        logger.info(`No progress for ${Math.floor(noProgressTime/1000)} seconds in playlist ${playlistName}. Moving to next playlist.`);
+        // Mark playlist as completed in state
+        if (stateManager.getPlaylistState(playlistName)) {
+          stateManager.getPlaylistState(playlistName).completed = true;
+          stateManager.saveState();
+        }
+        resolve();
+        return;
+      }
+      
+      // Case 3: Total timeout - 10 minutes max per playlist
+      if (Date.now() - startTime > 10 * 60 * 1000) {
+        logger.info(`Reached maximum time (10 minutes) for playlist ${playlistName}. Moving to next playlist.`);
+        // Mark playlist as completed in state
+        if (stateManager.getPlaylistState(playlistName)) {
+          stateManager.getPlaylistState(playlistName).completed = true;
+          stateManager.saveState();
+        }
+        resolve();
+        return;
+      }
       
       // Continue checking
       setTimeout(checkComplete, checkIntervalMs);

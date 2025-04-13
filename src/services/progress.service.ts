@@ -167,24 +167,29 @@ export class ProgressTracker {
     // Summary line
     lines.push(`[Aersia Downloader] Overall Progress: ${progress.completed}/${progress.total} | Failed: ${progress.failed} | Elapsed: ${formatTime(elapsedTime)}`);
     
-    // Show progress per playlist
+    // Show progress per playlist in a simpler format
+    lines.push('\nPlaylist Progress:');
+    
+    // Get all playlists with their stats
     const playlists = this.stateManager.getAllPlaylists();
     if (playlists.length > 0) {
-      lines.push('\nProgress by Playlist:');
+      const playlistStats = playlists.map(playlist => {
+        const stats = this.stateManager.getPlaylistStats(playlist.name);
+        return { name: playlist.name, stats, completed: playlist.completed };
+      });
       
-      playlists.forEach(playlist => {
-        const playlistStats = this.stateManager.getPlaylistStats(playlist.name);
-        const total = playlistStats.total;
-        const completed = playlistStats.completed;
-        
-        // Skip empty playlists
-        if (total === 0) return;
-        
-        const completionPercentage = Math.round((completed / total) * 100);
-        
-        // Make progress bar clearer with exact numbers
-        const progressBar = this.createProgressBar(completionPercentage);
-        lines.push(`  ${playlist.name.padEnd(10)} ${progressBar} ${completed}/${total} (${completionPercentage}%)`);
+      // Sort playlists: first non-completed, then alphabetically
+      playlistStats.sort((a, b) => {
+        if (a.completed !== b.completed) {
+          return a.completed ? 1 : -1;
+        }
+        return a.name.localeCompare(b.name);
+      });
+      
+      playlistStats.forEach(playlist => {
+        const { name, stats } = playlist;
+        const completionPercentage = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 100;
+        lines.push(`  ${name.padEnd(10)} ${stats.completed}/${stats.total} (${completionPercentage}%)`);
       });
     }
     
@@ -196,10 +201,18 @@ export class ProgressTracker {
       // Show breakdown of current playlist status
       const playlistStats = this.stateManager.getPlaylistStats(currentPlaylist);
       lines.push(`  Completed: ${playlistStats.completed}, Pending: ${playlistStats.pending}, Failed: ${playlistStats.failed}`);
+      
+      // Visual progress bar for current playlist
+      const completionPercentage = playlistStats.total > 0 ? Math.round((playlistStats.completed / playlistStats.total) * 100) : 100;
+      const progressBar = this.createProgressBar(completionPercentage);
+      lines.push(`  Progress: ${progressBar} ${completionPercentage}%`);
     }
     
     // Active downloads with more details
-    const activeDownloads = this.downloadManager.getActiveDownloadsForPlaylist(currentPlaylist);
+    const activeDownloads = currentPlaylist 
+      ? this.downloadManager.getActiveDownloadsForPlaylist(currentPlaylist)
+      : [];
+      
     if (activeDownloads.length > 0) {
       lines.push('\nActive Downloads:');
       

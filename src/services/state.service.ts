@@ -9,6 +9,10 @@ export interface DownloadState {
       tracks: Track[];
       completed: boolean;
       lastUpdated: Date;
+      totalCount: number;      // Added total count from source
+      completedCount: number;  // Added completed count
+      pendingCount: number;    // Added pending count
+      failedCount: number;     // Added failed count
     }
   };
   currentPlaylist: string;
@@ -65,6 +69,12 @@ export class StateManager {
         
         Object.values(state.playlists).forEach(playlist => {
           playlist.lastUpdated = new Date(playlist.lastUpdated);
+          
+          // Initialize count fields if they don't exist
+          if (playlist.totalCount === undefined) playlist.totalCount = playlist.tracks.length || 0;
+          if (playlist.completedCount === undefined) playlist.completedCount = 0;
+          if (playlist.pendingCount === undefined) playlist.pendingCount = 0;
+          if (playlist.failedCount === undefined) playlist.failedCount = 0;
         });
         
         this.logger.info(`Loaded existing state file: ${this.stateFilePath}`);
@@ -103,20 +113,36 @@ export class StateManager {
       this.state.playlists[name] = {
         tracks: [],
         completed: false,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        totalCount: 0,
+        completedCount: 0,
+        pendingCount: 0,
+        failedCount: 0
       };
       this.logger.info(`Initialized new playlist: ${name}`);
     } else {
       this.logger.info(`Updating existing playlist: ${name}`);
     }
     
+    // Check and fix malformed IDs in existing state
+    if (this.state.playlists[name].tracks.some(t => t.id === `${name}-undefined`)) {
+      this.logger.warn(`Found tracks with malformed IDs in ${name} playlist, fixing...`);
+      this.state.playlists[name].tracks.forEach(track => {
+        if (track.id === `${name}-undefined`) {
+          // Generate a new unique ID for this track
+          track.id = `${name}-${Math.random().toString(36).substring(2, 10)}`;
+        }
+      });
+    }
+    
     // Add new tracks that don't exist in the current state
-    const existingIds = new Set(this.state.playlists[name].tracks.map(t => t.id));
+    // Use filePath for comparison since IDs might have been regenerated
+    const existingFilePaths = new Set(this.state.playlists[name].tracks.map(t => t.filePath));
     let newTracksCount = 0;
     
     tracks.forEach(track => {
-      if (!existingIds.has(track.id)) {
-        // If track is new, add it with PENDING status
+      if (!existingFilePaths.has(track.filePath)) {
+        // Track is new, add it to state
         this.state.playlists[name].tracks.push({
           ...track,
           status: track.status || TrackStatus.PENDING,
@@ -124,50 +150,73 @@ export class StateManager {
           bytesDownloaded: track.bytesDownloaded || 0
         });
         newTracksCount++;
+      } else {
+        // Update existing track status based on input track if needed
+        const existingTrack = this.state.playlists[name].tracks.find(t => t.filePath === track.filePath);
+        if (existingTrack && track.status === TrackStatus.COMPLETED && existingTrack.status !== TrackStatus.COMPLETED) {
+          existingTrack.status = TrackStatus.COMPLETED;
+          existingTrack.bytesDownloaded = 1; // Just a placeholder for completed
+          this.logger.debug(`Updated track status to COMPLETED: ${track.fileName}`);
+        }
       }
     });
     
     this.logger.info(`Added ${newTracksCount} new tracks to playlist ${name}`);
     
-    // Verify if any tracks marked as completed actually exist
-    this.validateCompletedTracks(name);
+    // Update total count to reflect the actual number of tracks for this playlist
+    this.state.playlists[name].totalCount = tracks.length;
     
+    // Recalculate counts for this playlist
+    this.recalculatePlaylistCounts(name);
+    
+    // Recalculate overall progress
     this.recalculateProgress();
+    
+    // Save state
     this.saveState();
   }
 
   /**
-   * Verify that tracks marked as completed actually have files on disk
+   * Recalculate count statistics for a specific playlist
    */
-  private validateCompletedTracks(playlistName: string): void {
+  private recalculatePlaylistCounts(playlistName: string): void {
     const playlist = this.state.playlists[playlistName];
     if (!playlist) return;
     
-    let revertedTracks = 0;
+    let completed = 0;
+    let failed = 0;
+    let pending = 0;
     
     playlist.tracks.forEach(track => {
-      if (track.status === TrackStatus.COMPLETED) {
-        // Check if the file actually exists
-        try {
-          if (!fs.existsSync(track.filePath)) {
-            // File doesn't exist despite being marked as completed
-            track.status = TrackStatus.PENDING;
-            track.bytesDownloaded = 0;
-            revertedTracks++;
-            this.logger.warn(`Track marked completed but file not found, reverting to pending: ${track.fileName}`);
-          }
-        } catch (error) {
-          // If there's an error checking, assume file doesn't exist
-          track.status = TrackStatus.PENDING;
-          track.bytesDownloaded = 0;
-          revertedTracks++;
-        }
+      switch (track.status) {
+        case TrackStatus.COMPLETED:
+        case TrackStatus.SKIPPED:
+          completed++;
+          break;
+        case TrackStatus.FAILED:
+          failed++;
+          break;
+        case TrackStatus.PENDING:
+        case TrackStatus.IN_PROGRESS:
+          pending++;
+          break;
       }
     });
     
-    if (revertedTracks > 0) {
-      this.logger.info(`Reverted ${revertedTracks} tracks from completed to pending in playlist ${playlistName}`);
+    playlist.completedCount = completed;
+    playlist.failedCount = failed;
+    playlist.pendingCount = pending;
+    
+    // Check if playlist is completed
+    const allCompleted = playlist.tracks.every(
+      t => t.status === TrackStatus.COMPLETED || t.status === TrackStatus.SKIPPED
+    );
+    
+    if (allCompleted && !playlist.completed) {
+      this.logger.info(`Playlist ${playlistName} is now complete!`);
     }
+    
+    playlist.completed = allCompleted;
   }
 
   public updateTrackStatus(
@@ -212,18 +261,13 @@ export class StateManager {
     // Update playlist lastUpdated timestamp
     playlist.lastUpdated = new Date();
     
-    // Check if playlist is completed
-    const allCompleted = playlist.tracks.every(
-      t => t.status === TrackStatus.COMPLETED || t.status === TrackStatus.SKIPPED
-    );
+    // Recalculate counts for this playlist
+    this.recalculatePlaylistCounts(playlistName);
     
-    if (allCompleted && !playlist.completed) {
-      this.logger.info(`Playlist ${playlistName} is now complete!`);
-    }
-    
-    playlist.completed = allCompleted;
-    
+    // Recalculate overall progress
     this.recalculateProgress();
+    
+    // Save state
     this.saveState();
   }
 
@@ -243,22 +287,10 @@ export class StateManager {
     let pending = 0;
     
     Object.values(this.state.playlists).forEach(playlist => {
-      playlist.tracks.forEach(track => {
-        total++;
-        switch (track.status) {
-          case TrackStatus.COMPLETED:
-          case TrackStatus.SKIPPED:
-            completed++;
-            break;
-          case TrackStatus.FAILED:
-            failed++;
-            break;
-          case TrackStatus.PENDING:
-          case TrackStatus.IN_PROGRESS:
-            pending++;
-            break;
-        }
-      });
+      total += playlist.totalCount;
+      completed += playlist.completedCount;
+      failed += playlist.failedCount;
+      pending += playlist.pendingCount;
     });
     
     this.state.overallProgress = {
@@ -284,9 +316,52 @@ export class StateManager {
       return [];
     }
     
+    // Create a map of all files that actually exist in the playlist directory
+    const existingFiles = new Map<string, boolean>();
+    try {
+      const playlistDir = path.join(process.cwd(), 'Aersia Playlists', playlistName);
+      if (fs.existsSync(playlistDir)) {
+        const files = fs.readdirSync(playlistDir);
+        files.forEach(file => {
+          existingFiles.set(file.toLowerCase(), true);
+        });
+        this.logger.debug(`Found ${files.length} files in ${playlistName} directory`);
+      }
+    } catch (error) {
+      this.logger.error(`Error checking playlist directory: ${error}`);
+    }
+    
+    // For each track, verify if file exists on disk
+    let updatedTracks = 0;
+    playlist.tracks.forEach(track => {
+      const fileName = path.basename(track.filePath);
+      const fileExists = existingFiles.has(fileName.toLowerCase());
+      
+      if (track.status === TrackStatus.COMPLETED && !fileExists) {
+        track.status = TrackStatus.PENDING;
+        track.bytesDownloaded = 0;
+        updatedTracks++;
+        this.logger.debug(`File missing for completed track, reverted to PENDING: ${track.fileName}`);
+      } else if (track.status !== TrackStatus.COMPLETED && fileExists) {
+        track.status = TrackStatus.COMPLETED;
+        track.bytesDownloaded = 1; // Just a placeholder
+        updatedTracks++;
+        this.logger.debug(`File exists for non-completed track, updated to COMPLETED: ${track.fileName}`);
+      }
+    });
+    
+    if (updatedTracks > 0) {
+      this.logger.info(`Updated status for ${updatedTracks} tracks in ${playlistName} based on file existence check`);
+      // Recalculate counts
+      this.recalculatePlaylistCounts(playlistName);
+      this.recalculateProgress();
+      this.saveState();
+    }
+    
+    // After verification, get pending tracks
     const pendingTracks = playlist.tracks.filter(
       t => t.status === TrackStatus.PENDING || 
-           (t.status === TrackStatus.FAILED && (t.retryCount || 0) < 5)
+         (t.status === TrackStatus.FAILED && (t.retryCount || 0) < 5)
     );
     
     this.logger.info(`Found ${pendingTracks.length} pending tracks in playlist ${playlistName}`);
@@ -304,31 +379,11 @@ export class StateManager {
       return { total: 0, completed: 0, failed: 0, pending: 0 };
     }
     
-    let completed = 0;
-    let failed = 0;
-    let pending = 0;
-    
-    playlist.tracks.forEach(track => {
-      switch (track.status) {
-        case TrackStatus.COMPLETED:
-        case TrackStatus.SKIPPED:
-          completed++;
-          break;
-        case TrackStatus.FAILED:
-          failed++;
-          break;
-        case TrackStatus.PENDING:
-        case TrackStatus.IN_PROGRESS:
-          pending++;
-          break;
-      }
-    });
-    
     return {
-      total: playlist.tracks.length,
-      completed,
-      failed,
-      pending
+      total: playlist.totalCount,
+      completed: playlist.completedCount,
+      failed: playlist.failedCount,
+      pending: playlist.pendingCount
     };
   }
 
@@ -345,38 +400,18 @@ export class StateManager {
     
     // Count tracks by status
     const statusCounts = {
-      completed: 0,
-      skipped: 0,
-      pending: 0,
-      in_progress: 0,
-      failed: 0
+      completed: playlist.completedCount,
+      skipped: playlist.tracks.filter(t => t.status === TrackStatus.SKIPPED).length,
+      pending: playlist.pendingCount,
+      in_progress: playlist.tracks.filter(t => t.status === TrackStatus.IN_PROGRESS).length,
+      failed: playlist.failedCount
     };
-    
-    playlist.tracks.forEach(track => {
-      switch (track.status) {
-        case TrackStatus.COMPLETED:
-          statusCounts.completed++;
-          break;
-        case TrackStatus.SKIPPED:
-          statusCounts.skipped++;
-          break;
-        case TrackStatus.PENDING:
-          statusCounts.pending++;
-          break;
-        case TrackStatus.IN_PROGRESS:
-          statusCounts.in_progress++;
-          break;
-        case TrackStatus.FAILED:
-          statusCounts.failed++;
-          break;
-      }
-    });
     
     return {
       name: playlistName,
       completed: playlist.completed,
       lastUpdated: playlist.lastUpdated,
-      trackCount: playlist.tracks.length,
+      trackCount: playlist.totalCount,
       statusCounts,
       // Include sample of tracks in each state for debugging
       sampleTracks: {
@@ -415,7 +450,21 @@ export class StateManager {
       // Also log overall progress
       const overall = this.getOverallProgress();
       this.logger.debug(`Overall progress: ${overall.completed}/${overall.total} completed, ${overall.failed} failed, ${overall.pending} pending`);
+      
+      // Log progress for each playlist in a simple format
+      this.logSimplePlaylistProgress();
     }, intervalMs);
+  }
+
+  /**
+   * Log a simple progress summary for all playlists
+   */
+  public logSimplePlaylistProgress(): void {
+    const playlistProgress = Object.entries(this.state.playlists)
+      .map(([name, playlist]) => `${name} ${playlist.completedCount}/${playlist.totalCount}`)
+      .join(' ');
+    
+    this.logger.info(`Playlist Progress: ${playlistProgress}`);
   }
 
   public stopPeriodicStateLogging(): void {
@@ -427,10 +476,16 @@ export class StateManager {
 
   public getResumeInfo(): string {
     const { completed, total, failed } = this.state.overallProgress;
+    
+    // Get progress for each playlist
+    const playlistProgress = Object.entries(this.state.playlists)
+      .map(([name, playlist]) => `${name}: ${playlist.completedCount}/${playlist.totalCount}`)
+      .join(', ');
+    
     return `Resume information:
   - Started: ${this.state.startTime.toLocaleString()}
-  - Progress: ${completed}/${total} (${failed} failed)
-  - Playlists: ${Object.keys(this.state.playlists).join(', ')}`;
+  - Overall Progress: ${completed}/${total} (${failed} failed)
+  - Playlist Progress: ${playlistProgress}`;
   }
 
   public cleanup(): void {

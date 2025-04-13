@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "clean": "rimraf dist",
+    "cleanup": "ts-node src/utils/state-cleanup.ts",
     "lint": "eslint src --ext .ts",
     "prepare": "npm run build"
   },
