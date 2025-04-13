@@ -1,10 +1,18 @@
 {
   "name": "aersia-hoshii",
-  "version": "1.0.0",
-  "description": " Simple utility script that downloads all the songs from the Aersia playlists (VIP, Source, Mellow & Exiled)",
-  "main": "script.ts",
+  "version": "2.0.0",
+  "description": "Advanced utility script that downloads songs from the Aersia playlists with resume capability",
+  "main": "dist/index.js",
+  "bin": {
+    "aersia-hoshii": "./dist/index.js"
+  },
   "scripts": {
-    "start": "tsc script.ts && node script.js"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rimraf dist",
+    "lint": "eslint src --ext .ts",
+    "prepare": "npm run build"
   },
   "repository": {
     "type": "git",
@@ -13,7 +21,9 @@
   "keywords": [
     "aersia",
     "script",
-    "downloader"
+    "downloader",
+    "music",
+    "vgm"
   ],
   "author": "tsuzushii",
   "license": "ISC",
@@ -22,15 +32,27 @@
   },
   "homepage": "https://github.com/soichirou/aersia-hoshii#readme",
   "dependencies": {
-    "@types/axios": "^0.14.0",
-    "@types/xml2js": "^0.4.5",
-    "axios": "^0.21.2",
+    "axios": "^1.8.4",
+    "cmake-js": "^7.3.0",
+    "commander": "^9.4.1",
     "sanitize-filename-ts": "^1.0.2",
     "taglib3": "^3.0.11",
-    "xml2js": "^0.4.23"
+    "tar": "^7.4.3",
+    "uuid": "^9.0.0",
+    "xml2js": "^0.5.0"
   },
   "devDependencies": {
-    "@types/node": "^14.0.13",
-    "typescript": "^3.9.5"
+    "@types/node": "^18.11.9",
+    "@types/uuid": "^9.0.0",
+    "@types/xml2js": "^0.4.11",
+    "@typescript-eslint/eslint-plugin": "^5.42.1",
+    "@typescript-eslint/parser": "^5.42.1",
+    "eslint": "^8.27.0",
+    "rimraf": "^3.0.2",
+    "ts-node": "^10.9.1",
+    "typescript": "^4.8.4"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
